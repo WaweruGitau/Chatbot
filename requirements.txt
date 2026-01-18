@@ -1,0 +1,11 @@
+torch
+transformers
+langchain
+langchain-community
+langchain-huggingface
+sentence-transformers
+faiss-cpu
+accelerate
+docx2txt
+fastapi
+uvicorn

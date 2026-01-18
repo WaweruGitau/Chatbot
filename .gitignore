@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Large Model Files (Too large for GitHub, download fresh)
+models/
+
+# Data (Sensitive or local documents)
+data/
+
+# Logs (Runtime artifacts)
+logs/
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
