@@ -78,16 +78,6 @@ else:
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
 
-# Create a generic HF pipeline (Faster)
-# pipe = pipeline(
-#     "text2text-generation",
-#     model=model,
-#     tokenizer=tokenizer,
-#     max_new_tokens=128,
-#     truncation=True,
-#     do_sample=False,
-#     num_beams=1
-# )
 
 pipe = pipeline(
     "text2text-generation",
@@ -104,13 +94,48 @@ pipe = pipeline(
 
 llm = HuggingFacePipeline(pipeline=pipe)
 
-# --- GEMINI CLOUD CONFIGURATION ---
-# Toggle this to True to use the Cloud Gemini API, False to use the Local model
-USE_CLOUD_LLM = True
+# --- LLM CONFIGURATION ---
+# Choose your LLM: 'ollama', 'gemini', or 'local'
+LLM_CHOICE = 'local'  # Recommended: Use Ollama for best performance
 
+# Ollama Configuration
+OLLAMA_BASE_URL = "http://10.10.0.147:11434"  # Default Ollama URL
+OLLAMA_MODEL = "llama3.2"  # Your downloaded model
+
+# Gemini Cloud Configuration
 GEMINI_API_KEY = 'AIzaSyDPjeUkZ2_oFice-A2FBA5uvwDMYqmvBzo'
-# The user specified gemini-2.5-flash, if it doesn't exist, you might need gemini-1.5-flash
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+
+def get_ollama_response(prompt):
+    """
+    Calls the local Ollama API to generate a response using Llama 3.2.
+    """
+    url = f"{OLLAMA_BASE_URL}/api/generate"
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.3,  # Lower temperature for more focused responses
+            "top_p": 0.9,
+            "num_predict": 512   # Max tokens to generate
+        }
+    }
+    
+    try:
+        response = requests.post(url, json=payload, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        
+        if "response" in data:
+            return data["response"].strip()
+        else:
+            return "Error: Ollama API returned no content."
+            
+    except requests.exceptions.ConnectionError:
+        return "Error: Cannot connect to Ollama. Make sure Ollama is running (try 'ollama serve' in terminal)."
+    except Exception as e:
+        return f"Ollama API Error: {str(e)}"
 
 def get_gemini_response(prompt):
     """
@@ -125,10 +150,9 @@ def get_gemini_response(prompt):
     
     try:
         response = requests.post(GEMINI_URL, headers=headers, json=payload)
-        response.raise_for_status() # Raise error for bad status codes
+        response.raise_for_status()
         data = response.json()
         
-        # Extract the text from the Gemini response structure
         if "candidates" in data and len(data["candidates"]) > 0:
             return data["candidates"][0]["content"]["parts"][0]["text"].strip()
         else:
@@ -214,10 +238,13 @@ def ask_credit_bot(query, user_id="default"):
     # 3. If a metric's threshold is not found in the Context, state 'Threshold not specified' for that metric.
 
     # Generate answer using the selected LLM
-    if USE_CLOUD_LLM:
+    if LLM_CHOICE == 'ollama':
+        print("Model: Ollama (Llama 3.2)")
+        response = get_ollama_response(prompt)
+    elif LLM_CHOICE == 'gemini':
         print("Model: Gemini Cloud")
         response = get_gemini_response(prompt)
-    else:
+    else:  # 'local' or fallback
         print("Model: Local Flan-T5")
         response = llm.invoke(prompt)
     
