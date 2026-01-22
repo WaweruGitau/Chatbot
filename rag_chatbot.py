@@ -1,5 +1,7 @@
 import os
 import csv
+import json
+import requests
 from datetime import datetime
 from collections import deque
 from langchain_community.document_loaders import TextLoader, Docx2txtLoader
@@ -94,13 +96,47 @@ pipe = pipeline(
     max_new_tokens=256,      
     truncation=True,
     do_sample=True,          
-    temperature=0.7,         
+    temperature=0.2,         
     top_p=0.9,
     num_beams=1
 )
 
 
 llm = HuggingFacePipeline(pipeline=pipe)
+
+# --- GEMINI CLOUD CONFIGURATION ---
+# Toggle this to True to use the Cloud Gemini API, False to use the Local model
+USE_CLOUD_LLM = True
+
+GEMINI_API_KEY = 'AIzaSyDPjeUkZ2_oFice-A2FBA5uvwDMYqmvBzo'
+# The user specified gemini-2.5-flash, if it doesn't exist, you might need gemini-1.5-flash
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+
+def get_gemini_response(prompt):
+    """
+    Calls the Google Gemini API to generate a response.
+    """
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
+    try:
+        response = requests.post(GEMINI_URL, headers=headers, json=payload)
+        response.raise_for_status() # Raise error for bad status codes
+        data = response.json()
+        
+        # Extract the text from the Gemini response structure
+        if "candidates" in data and len(data["candidates"]) > 0:
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        else:
+            return "Error: Gemini API returned no content."
+            
+    except Exception as e:
+        return f"Gemini API Error: {str(e)}"
+# -----------------------------------
 
 def get_user_memory(user_id):
     if user_id not in user_memories:
@@ -137,7 +173,8 @@ def ask_credit_bot(query, user_id="default"):
     # Check if db exists (it might be None if no docs were found)
     context_text = ""
     if db:
-        relevant_docs = db.similarity_search(query, k=1)
+        # Increased k to 5 to capture more context for multiple metrics
+        relevant_docs = db.similarity_search(query, k=5)
         context_text = "\n\n".join([d.page_content for d in relevant_docs])
     else:
         context_text = "No knowledge base documents found."
@@ -147,28 +184,42 @@ def ask_credit_bot(query, user_id="default"):
     
     # Get specific user memory
     memory = get_user_memory(user_id)
-    history_text = "\n".join(memory)
+    
+    ##history_text = "\n".join(memory)
 
-    print(f"\n History is : {history_text}")
+    ##print(f"\n History is : {history_text}")
     
     # Construct a prompt for RAG
-    # We improve the prompt to ask for complete sentences and consider history
-    prompt = f"""You are a helpful credit scoring assistant. 
-                Use the Context below to answer the Question in clear and complete sentences.
+    # Specifically instructing the model to handle metric-by-metric evaluation
+    prompt = f"""You are a professional credit scoring analyst assistant.
     
-
-        Context:
-        {context_text}
-
-        History:
-        {history_text}
-
-        Question: {query}
-        Answer:""" 
+    TASK:
+    Analyze the 'Customer Scores' provided in the Question. 
+    Use the Context below to determine if each metric score is 'Good', 'Average', or 'Bad' based on the defined thresholds.
     
+    OUTPUT FORMAT:
+    1. Provide a clear, concise paragraph summarizing the overall credit health of the customer.
 
-    # Generate answer
-    response = llm.invoke(prompt)
+    Context (Knowledge Base):
+    {context_text}
+
+    Question/Input:
+    {query}
+
+    Evaluation and Summary:"""    
+
+    # OUTPUT FORMAT:
+    # 1. Provide a brief evaluation for each metric mentioned.
+    # 2. Conclude with a clear, concise paragraph summarizing the overall credit health of the customer.
+    # 3. If a metric's threshold is not found in the Context, state 'Threshold not specified' for that metric.
+
+    # Generate answer using the selected LLM
+    if USE_CLOUD_LLM:
+        print("Model: Gemini Cloud")
+        response = get_gemini_response(prompt)
+    else:
+        print("Model: Local Flan-T5")
+        response = llm.invoke(prompt)
     
     # Update memory
     memory.append(f"User: {query}")
