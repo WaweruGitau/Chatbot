@@ -28,8 +28,13 @@ try:
     print("Testing Credit Scoring Summary...")
     response = requests.post(url, json=payload)
     if response.status_code == 200:
+        data = response.json()
         print("\n--- Model Response ---\n")
-        print(response.json()["response"])
+        print(data["response"])
+        if "metrics" in data and data["metrics"]:
+            print("\n--- Performance Metrics ---")
+            for metric, val in data["metrics"].items():
+                print(f"{metric:20}: {val}s")
     else:
         print(f"Error: {response.status_code}")
         print(response.text)

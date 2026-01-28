@@ -2,14 +2,18 @@ import os
 import csv
 import json
 import requests
+import time
 from datetime import datetime
 from collections import deque
 from langchain_community.document_loaders import TextLoader, Docx2txtLoader
 from langchain_text_splitters import CharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_huggingface import HuggingFacePipeline
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
+
+# --- LLM CONFIGURATION ---
+# Using Ollama Model
+OLLAMA_BASE_URL = "http://10.10.0.147:11434"  # Default Ollama URL
+OLLAMA_MODEL = "llama3.2"  # Your downloaded model
 
 # 1. Load the Knowledge Base
 print("Loading data from ./data directory...")
@@ -60,51 +64,11 @@ else:
 
 
 
-# 5. Initialize Memory
+# Initialize Memory
 # memory is now a dict: {user_id: deque(maxlen=6)}
 user_memories = {}
 
-# ... [Load models] ...
-# Initialize Flan-T5-Base
-print("Checking for local model...")
-local_model_path = "./models/flan-t5-large"
-
-# Check if looks like a model directory (has config.json)
-if os.path.isdir(local_model_path) and os.path.exists(os.path.join(local_model_path, "config.json")):
-    print(f"Loading from local folder: {local_model_path}")
-    model_id = local_model_path
-else:
-    raise FileNotFoundError(f"Model not found in {local_model_path}. Please place your model files there.")
-tokenizer = AutoTokenizer.from_pretrained(model_id)
-model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
-
-
-pipe = pipeline(
-    "text2text-generation",
-    model=model,
-    tokenizer=tokenizer,
-    max_new_tokens=256,      
-    truncation=True,
-    do_sample=True,          
-    temperature=0.2,         
-    top_p=0.9,
-    num_beams=1
-)
-
-
-llm = HuggingFacePipeline(pipeline=pipe)
-
-# --- LLM CONFIGURATION ---
-# Choose your LLM: 'ollama', 'gemini', or 'local'
-LLM_CHOICE = 'local'  # Recommended: Use Ollama for best performance
-
-# Ollama Configuration
-OLLAMA_BASE_URL = "http://10.10.0.147:11434"  # Default Ollama URL
-OLLAMA_MODEL = "llama3.2"  # Your downloaded model
-
-# Gemini Cloud Configuration
-GEMINI_API_KEY = 'AIzaSyDPjeUkZ2_oFice-A2FBA5uvwDMYqmvBzo'
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+# (Configuration moved to top of file)
 
 def get_ollama_response(prompt):
     """
@@ -116,14 +80,14 @@ def get_ollama_response(prompt):
         "prompt": prompt,
         "stream": False,
         "options": {
-            "temperature": 0.3,  # Lower temperature for more focused responses
+            "temperature": 0.1,  # Lowered for more consistent, concise output
             "top_p": 0.9,
-            "num_predict": 512   # Max tokens to generate
+            "num_predict": 256   # Reduced token limit to improve speed
         }
     }
     
     try:
-        response = requests.post(url, json=payload, timeout=60)
+        response = requests.post(url, json=payload, timeout=300)
         response.raise_for_status()
         data = response.json()
         
@@ -132,34 +96,49 @@ def get_ollama_response(prompt):
         else:
             return "Error: Ollama API returned no content."
             
+            
     except requests.exceptions.ConnectionError:
         return "Error: Cannot connect to Ollama. Make sure Ollama is running (try 'ollama serve' in terminal)."
     except Exception as e:
         return f"Ollama API Error: {str(e)}"
 
-def get_gemini_response(prompt):
+def get_ollama_response_stream(prompt):
     """
-    Calls the Google Gemini API to generate a response.
+    Yields chunks of the response from Ollama API provided stream=True.
     """
-    headers = {'Content-Type': 'application/json'}
+    url = f"{OLLAMA_BASE_URL}/api/generate"
     payload = {
-        "contents": [{
-            "parts": [{"text": prompt}]
-        }]
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": True,
+        "options": {
+            "temperature": 0.1,
+            "top_p": 0.9,
+            "num_predict": 256
+        }
     }
     
     try:
-        response = requests.post(GEMINI_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
-        
-        if "candidates" in data and len(data["candidates"]) > 0:
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        else:
-            return "Error: Gemini API returned no content."
-            
+        with requests.post(url, json=payload, stream=True, timeout=300) as response:
+            response.raise_for_status()
+            for line in response.iter_lines():
+                if line:
+                    # Parse the JSON chunk
+                    body = json.loads(line)
+                    response_part = body.get("response", "")
+                    if response_part:
+                        yield response_part
+                    
+                    if body.get("done", False):
+                        break
+                        
+    except requests.exceptions.ConnectionError:
+        yield "Error: Cannot connect to Ollama. Make sure Ollama is running."
     except Exception as e:
-        return f"Gemini API Error: {str(e)}"
+        yield f"Ollama API Error: {str(e)}"
+
+
+
 # -----------------------------------
 
 def get_user_memory(user_id):
@@ -167,7 +146,7 @@ def get_user_memory(user_id):
         user_memories[user_id] = deque(maxlen=6)
     return user_memories[user_id]
 
-def log_interaction(user_id, question, answer):
+def log_interaction(user_id, question, answer, metrics=None):
     """
     Logs the user interaction to a CSV file for performance monitoring.
     """
@@ -183,80 +162,208 @@ def log_interaction(user_id, question, answer):
             writer = csv.writer(f)
             # Write header if file is new
             if not file_exists:
-                writer.writerow(["Timestamp", "User ID", "Question", "Answer"])
+                writer.writerow(["Timestamp", "User ID", "Question", "Answer", "Embed Time", "Search Time", "Retrieval Time", "Prompt Time", "LLM Time", "Total Time"])
             
-            writer.writerow([datetime.now().isoformat(), user_id, question, answer])
+            row = [datetime.now().isoformat(), user_id, question, answer]
+            if metrics:
+                row.extend([
+                    metrics.get("embed_time", 0),
+                    metrics.get("search_time", 0),
+                    metrics.get("retrieval_time", 0),
+                    metrics.get("prompt_time", 0),
+                    metrics.get("llm_time", 0),
+                    metrics.get("total_time", 0)
+                ])
+            else:
+                row.extend([0, 0, 0, 0, 0, 0])
+                
+            writer.writerow(row)
     except Exception as e:
         print(f"Failed to log interaction: {e}")
 
 # Define the Retrieval Function
 def ask_credit_bot(query, user_id="default"):
+    start_total = time.time()
     print(f"\nQuery: {query} (User: {user_id})")
     
-    # Retrieve relevant docs
-    # Check if db exists (it might be None if no docs were found)
+    # 1. Retrieval Stage (Split into Embedding and Search)
     context_text = ""
+    retrieval_time = 0
+    embed_time = 0
+    search_time = 0
+    
     if db:
-        # Increased k to 5 to capture more context for multiple metrics
-        relevant_docs = db.similarity_search(query, k=5)
+        # Measure Embedding time
+        start_embed = time.time()
+        # We access the underlying embedding model to embed the query separately
+        query_vec = embeddings.embed_query(query)
+        embed_time = time.time() - start_embed
+        
+        # Measure Search time
+        start_search = time.time()
+        relevant_docs = db.similarity_search_by_vector(query_vec, k=5)
         context_text = "\n\n".join([d.page_content for d in relevant_docs])
+        search_time = time.time() - start_search
+        
+        retrieval_time = embed_time + search_time
     else:
         context_text = "No knowledge base documents found."
     
-    print(f"\n Context is : {context_text}")
+    print(f"\nEmbedding took: {embed_time:.4f}s")
+    print(f"Vector Search took: {search_time:.4f}s")
+    # print(f"\n Context is : {context_text}")
 
-    
-    # Get specific user memory
+    # 2. Memory and Prompt Stage
+    start_prompt = time.time()
     memory = get_user_memory(user_id)
     
-    ##history_text = "\n".join(memory)
-
-    ##print(f"\n History is : {history_text}")
-    
-    # Construct a prompt for RAG
-    # Specifically instructing the model to handle metric-by-metric evaluation
+    # Updated Prompt for extreme brevity and structure
     prompt = f"""You are a professional credit scoring analyst assistant.
-    
-    TASK:
-    Analyze the 'Customer Scores' provided in the Question. 
-    Use the Context below to determine if each metric score is 'Good', 'Average', or 'Bad' based on the defined thresholds.
-    
+    Your task is to provide a highly concise evaluation. Do NOT explain every metric.
+    Only highlight the overall health and the most critical findings.
+
+    Rules:
+    - Use bullet points.
+    - Be direct. No filler phrases like "Based on the scores provided..."
+    - Maximum 4-5 bullet points total.
+
     OUTPUT FORMAT:
-    1. Provide a clear, concise paragraph summarizing the overall credit health of the customer.
+    - **Overall Rating**: [Good/Average/Poor]
+    - **Key Strengths**: (Short bullet points)
+    - **Critical Risks**: (Short bullet points)
+    - **Final Verdict**: (1 sentence summary)
 
     Context (Knowledge Base):
     {context_text}
 
-    Question/Input:
+    Customer Input:
     {query}
 
-    Evaluation and Summary:"""    
+    Concise Evaluation:"""    
+    prompt_time = time.time() - start_prompt
 
-    # OUTPUT FORMAT:
-    # 1. Provide a brief evaluation for each metric mentioned.
-    # 2. Conclude with a clear, concise paragraph summarizing the overall credit health of the customer.
-    # 3. If a metric's threshold is not found in the Context, state 'Threshold not specified' for that metric.
+    # 3. LLM Generation Stage
+    start_llm = time.time()
+    print(f"Model: Ollama ({OLLAMA_MODEL})")
+    response = get_ollama_response(prompt)
+    llm_time = time.time() - start_llm
+    
+    total_time = time.time() - start_total
 
-    # Generate answer using the selected LLM
-    if LLM_CHOICE == 'ollama':
-        print("Model: Ollama (Llama 3.2)")
-        response = get_ollama_response(prompt)
-    elif LLM_CHOICE == 'gemini':
-        print("Model: Gemini Cloud")
-        response = get_gemini_response(prompt)
-    else:  # 'local' or fallback
-        print("Model: Local Flan-T5")
-        response = llm.invoke(prompt)
+    print(f"LLM Generation took: {llm_time:.4f}s")
+    print(f"Total time: {total_time:.4f}s")
     
     # Update memory
     memory.append(f"User: {query}")
     memory.append(f"Bot: {response}")
     
-    # Log interaction to file
-    log_interaction(user_id, query, response)
+    # Log interaction to file (including timing)
+    log_interaction(user_id, query, response, metrics={
+        "embed_time": embed_time,
+        "search_time": search_time,
+        "retrieval_time": retrieval_time,
+        "prompt_time": prompt_time,
+        "llm_time": llm_time,
+        "total_time": total_time
+    })
 
-    print(f"\n Answer is : {response}")
-    return response
+    print(f"\nAnswer is: {response}")
+    
+    # Returning both response and metrics for potential API use
+    return {
+        "answer": response,
+        "metrics": {
+            "embedding_seconds": round(embed_time, 4),
+            "search_seconds": round(search_time, 4),
+            "prompt_seconds": round(prompt_time, 4),
+            "llm_seconds": round(llm_time, 4),
+            "total_seconds": round(total_time, 4)
+        }
+    }
+
+def ask_credit_bot_stream(query, user_id="default"):
+    """
+    Streaming version of the ask_credit_bot function.
+    Yields chunks of the answer and logs performance metrics.
+    """
+    start_total = time.time()
+    
+    # 1. Retrieval Stage
+    start_embed = time.time()
+    embed_time = 0
+    search_time = 0
+    retrieval_time = 0
+    context_text = ""
+    
+    if db:
+        # Measure Embedding time
+        query_vec = embeddings.embed_query(query)
+        embed_time = time.time() - start_embed
+        
+        # Measure Search time
+        start_search = time.time()
+        relevant_docs = db.similarity_search_by_vector(query_vec, k=5)
+        context_text = "\n\n".join([d.page_content for d in relevant_docs])
+        search_time = time.time() - start_search
+        
+        retrieval_time = embed_time + search_time
+    else:
+        context_text = "No knowledge base documents found."
+
+    # 2. Memory and Prompt Stage
+    start_prompt = time.time()
+    memory = get_user_memory(user_id)
+    
+    prompt = f"""You are a professional credit scoring analyst assistant.
+    Your task is to provide a highly concise evaluation. Do NOT explain every metric.
+    Only highlight the overall health and the most critical findings.
+
+    Rules:
+    - Use bullet points.
+    - Be direct. No filler phrases like "Based on the scores provided..."
+    - Maximum 4-5 bullet points total.
+
+    OUTPUT FORMAT:
+    - **Overall Rating**: [Good/Average/Poor]
+    - **Key Strengths**: (Short bullet points)
+    - **Critical Risks**: (Short bullet points)
+    - **Final Verdict**: (1 sentence summary)
+
+    Context (Knowledge Base):
+    {context_text}
+
+    Customer Input:
+    {query}
+
+    Concise Evaluation:"""    
+    prompt_time = time.time() - start_prompt
+
+    # 3. LLM Generation Stage (Streaming)
+    start_llm = time.time()
+    full_response = ""
+    for chunk in get_ollama_response_stream(prompt):
+        full_response += chunk
+        yield chunk
+    
+    llm_time = time.time() - start_llm
+    total_time = time.time() - start_total
+    
+    # Update memory after stream matches
+    memory.append(f"User: {query}")
+    memory.append(f"Bot: {full_response}")
+    
+    # Log interaction to file (including timing)
+    metrics = {
+        "embed_time": embed_time,
+        "search_time": search_time,
+        "retrieval_time": retrieval_time,
+        "prompt_time": prompt_time,
+        "llm_time": llm_time,
+        "total_time": total_time
+    }
+    
+    log_interaction(user_id, query, full_response, metrics=metrics)
+
 
 
 if __name__ == "__main__":
