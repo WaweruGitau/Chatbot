@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
-from rag_chatbot import ask_credit_bot, documents, ask_credit_bot_stream
+from rag_chatbot import ask_credit_bot, documents, ask_credit_bot_stream, warmup_ollama
 import uvicorn
 
 app = FastAPI(title="Credit Scoring RAG API")
@@ -24,6 +24,18 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     response: str
     metrics: Optional[dict] = None
+
+@app.on_event("startup")
+async def startup_event():
+    """
+    Warm up the Ollama model when the server starts.
+    This prevents the first user request from being slow.
+    """
+    print("\n" + "="*50)
+    print("🚀 Starting Credit Scoring RAG API Server")
+    print("="*50)
+    warmup_ollama()
+    print("="*50 + "\n")
 
 @app.get("/")
 def read_root():

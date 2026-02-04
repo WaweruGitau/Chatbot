@@ -79,12 +79,13 @@ def get_ollama_response(prompt):
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
+        "keep_alive": "1h",  # Keep model loaded for 1 hour to speed up subsequent requests
         "options": {
-            "temperature": 0.1,  # Lowered for more consistent, concise output
-            "top_p": 0.9,
+            "temperature": 0,  # Lowered for more consistent, concise output
+            "top_p": 1,
             "num_predict": 256   # Reduced token limit to improve speed
         }
-    }
+    } 
     
     try:
         response = requests.post(url, json=payload, timeout=300)
@@ -111,9 +112,10 @@ def get_ollama_response_stream(prompt):
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": True,
+        "keep_alive": "1h",  # Keep model loaded for 1 hour to speed up subsequent requests
         "options": {
-            "temperature": 0.1,
-            "top_p": 0.9,
+            "temperature": 0,
+            "top_p": 1,
             "num_predict": 256
         }
     }
@@ -137,6 +139,27 @@ def get_ollama_response_stream(prompt):
     except Exception as e:
         yield f"Ollama API Error: {str(e)}"
 
+
+
+def warmup_ollama():
+    """
+    Sends a dummy request to Ollama to load the model into memory.
+    This prevents the first real user request from being slow.
+    Call this when your server starts.
+    """
+    print(f"🔥 Warming up Ollama model ({OLLAMA_MODEL})...")
+    try:
+        start = time.time()
+        warmup_prompt = "Hello, system ready."
+        response = get_ollama_response(warmup_prompt)
+        elapsed = time.time() - start
+        print(f"✅ Ollama warmed up successfully in {elapsed:.2f}s")
+        print(f"   Response: {response[:50]}...")
+        return True
+    except Exception as e:
+        print(f"⚠️ Ollama warmup failed: {e}")
+        print(f"   Make sure Ollama is running at {OLLAMA_BASE_URL}")
+        return False
 
 
 # -----------------------------------
@@ -191,7 +214,7 @@ def ask_credit_bot(query, user_id="default"):
     retrieval_time = 0
     embed_time = 0
     search_time = 0
-    
+
     if db:
         # Measure Embedding time
         start_embed = time.time()
@@ -219,19 +242,9 @@ def ask_credit_bot(query, user_id="default"):
     
     # Updated Prompt for extreme brevity and structure
     prompt = f"""You are a professional credit scoring analyst assistant.
-    Your task is to provide a highly concise evaluation. Do NOT explain every metric.
-    Only highlight the overall health and the most critical findings.
-
-    Rules:
-    - Use bullet points.
-    - Be direct. No filler phrases like "Based on the scores provided..."
-    - Maximum 4-5 bullet points total.
-
-    OUTPUT FORMAT:
-    - **Overall Rating**: [Good/Average/Poor]
-    - **Key Strengths**: (Short bullet points)
-    - **Critical Risks**: (Short bullet points)
-    - **Final Verdict**: (1 sentence summary)
+    Provide clear answers based on user question and context.
+    If needed, provide short explanations with how to improve the credit score
+    Do not answer with no knowledge base.
 
     Context (Knowledge Base):
     {context_text}
@@ -287,6 +300,7 @@ def ask_credit_bot_stream(query, user_id="default"):
     Yields chunks of the answer and logs performance metrics.
     """
     start_total = time.time()
+    print(f"\nQuery: {query} (User: {user_id})")
     
     # 1. Retrieval Stage
     start_embed = time.time()
