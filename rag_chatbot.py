@@ -9,7 +9,8 @@ from langchain_text_splitters import CharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_huggingface import HuggingFacePipeline
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
+from threading import Thread
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline, TextIteratorStreamer
 
 # 1. Load the Knowledge Base
 print("Loading data from ./data directory...")
@@ -57,7 +58,6 @@ if docs:
     db = FAISS.from_documents(docs, embeddings)
 else:
     db = None
-
 
 
 # 5. Initialize Memory
@@ -160,6 +160,92 @@ def get_gemini_response(prompt):
             
     except Exception as e:
         return f"Gemini API Error: {str(e)}"
+
+def get_ollama_stream(prompt):
+    """
+    Streams response from Ollama API.
+    """
+    url = f"{OLLAMA_BASE_URL}/api/generate"
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": True,
+        "options": {
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "num_predict": 512
+        }
+    }
+    
+    try:
+        response = requests.post(url, json=payload, stream=True, timeout=60)
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if line:
+                chunk = json.loads(line)
+                if "response" in chunk:
+                    yield chunk["response"]
+                if chunk.get("done"):
+                    break
+    except Exception as e:
+        yield f"Ollama Streaming Error: {str(e)}"
+
+def get_gemini_stream(prompt):
+    """
+    Streams response from Gemini API.
+    """
+    # Use streamGenerateContent endpoint
+    stream_url = GEMINI_URL.replace("generateContent", "streamGenerateContent")
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
+    try:
+        response = requests.post(stream_url, headers=headers, json=payload, stream=True)
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if line:
+                # Gemini stream returns a JSON array of objects or single objects depending on state
+                # Usually it's a JSON list if it's the whole thing, but for streaming it might be different format
+                # Let's handle the common "SSE-like" format or direct JSON chunks
+                try:
+                    chunk = json.loads(line.decode('utf-8').lstrip(',').strip())
+                    if isinstance(chunk, list):
+                        for item in chunk:
+                            if "candidates" in item:
+                                yield item["candidates"][0]["content"]["parts"][0]["text"]
+                    elif "candidates" in chunk:
+                        yield chunk["candidates"][0]["content"]["parts"][0]["text"]
+                except:
+                    # Handle lines that might start with tokens or be partial
+                    pass
+    except Exception as e:
+        yield f"Gemini Streaming Error: {str(e)}"
+
+def get_local_stream(prompt):
+    """
+    Streams response from the local Flan-T5 model.
+    """
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
+    
+    generation_kwargs = dict(
+        inputs,
+        streamer=streamer,
+        max_new_tokens=256,
+        do_sample=True,
+        temperature=0.2,
+        top_p=0.9
+    )
+    
+    thread = Thread(target=model.generate, kwargs=generation_kwargs)
+    thread.start()
+    
+    for new_text in streamer:
+        yield new_text
 # -----------------------------------
 
 def get_user_memory(user_id):
@@ -257,6 +343,59 @@ def ask_credit_bot(query, user_id="default"):
 
     print(f"\n Answer is : {response}")
     return response
+
+def ask_credit_bot_stream(query, user_id="default"):
+    """
+    Generator version of ask_credit_bot for streaming.
+    """
+    print(f"\nStreaming Query: {query} (User: {user_id})")
+    
+    context_text = ""
+    if db:
+        relevant_docs = db.similarity_search(query, k=5)
+        context_text = "\n\n".join([d.page_content for d in relevant_docs])
+    else:
+        context_text = "No knowledge base documents found."
+    
+    prompt = f"""You are a professional credit scoring analyst assistant.
+    
+    TASK:
+    Analyze the 'Customer Scores' provided in the Question. 
+    Use the Context below to determine if each metric score is 'Good', 'Average', or 'Bad' based on the defined thresholds.
+    
+    OUTPUT FORMAT:
+    1. Provide a clear, concise paragraph summarizing the overall credit health of the customer.
+
+    Context (Knowledge Base):
+    {context_text}
+
+    Question/Input:
+    {query}
+
+    Evaluation and Summary:"""
+
+    memory = get_user_memory(user_id)
+    full_response = ""
+    
+    if LLM_CHOICE == 'ollama':
+        print("Model: Ollama (Streaming)")
+        stream = get_ollama_stream(prompt)
+    elif LLM_CHOICE == 'gemini':
+        print("Model: Gemini Cloud (Streaming)")
+        stream = get_gemini_stream(prompt)
+    else:
+        print("Model: Local Flan-T5 (Streaming)")
+        stream = get_local_stream(prompt)
+
+    for chunk in stream:
+        full_response += chunk
+        yield chunk
+
+    # Update memory and log after full response is generated
+    memory.append(f"User: {query}")
+    memory.append(f"Bot: {full_response}")
+    log_interaction(user_id, query, full_response)
+    print(f"\nFull Streaming Answer completed.")
 
 
 if __name__ == "__main__":
