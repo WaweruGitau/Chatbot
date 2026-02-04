@@ -11,9 +11,16 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 
 # --- LLM CONFIGURATION ---
-# Using Ollama Model
-OLLAMA_BASE_URL = "http://10.10.0.147:11434"  # Default Ollama URL
-OLLAMA_MODEL = "llama3.2"  # Your downloaded model
+# Choose your LLM: 'ollama' or 'gemini'
+LLM_CHOICE = 'gemini' 
+
+# Ollama Configuration
+OLLAMA_BASE_URL = "http://10.10.0.147:11434"
+OLLAMA_MODEL = "llama3.2"
+
+# Gemini Cloud Configuration
+GEMINI_API_KEY = 'AIzaSyCEN3YsoFS4gql_2gGqxVMCAfm1h1rM23w'
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
 
 # 1. Load the Knowledge Base
 print("Loading data from ./data directory...")
@@ -137,7 +144,60 @@ def get_ollama_response_stream(prompt):
     except Exception as e:
         yield f"Ollama API Error: {str(e)}"
 
+def get_gemini_response(prompt):
+    """
+    Calls the Google Gemini API to generate a response.
+    """
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
+    try:
+        response = requests.post(GEMINI_URL, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        
+        if "candidates" in data and len(data["candidates"]) > 0:
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        else:
+            return "Error: Gemini API returned no content."
+            
+    except Exception as e:
+        return f"Gemini API Error: {str(e)}"
 
+def get_gemini_response_stream(prompt):
+    """
+    Streams response from Gemini API.
+    """
+    # Use streamGenerateContent endpoint
+    stream_url = GEMINI_URL.replace("generateContent", "streamGenerateContent")
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
+    try:
+        response = requests.post(stream_url, headers=headers, json=payload, stream=True, timeout=60)
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if line:
+                try:
+                    chunk = json.loads(line.decode('utf-8').lstrip(',').strip())
+                    if isinstance(chunk, list):
+                        for item in chunk:
+                            if "candidates" in item:
+                                yield item["candidates"][0]["content"]["parts"][0]["text"]
+                    elif "candidates" in chunk:
+                        yield chunk["candidates"][0]["content"]["parts"][0]["text"]
+                except:
+                    pass
+    except Exception as e:
+        yield f"Gemini Streaming Error: {str(e)}"
 
 # -----------------------------------
 
@@ -244,8 +304,16 @@ def ask_credit_bot(query, user_id="default"):
 
     # 3. LLM Generation Stage
     start_llm = time.time()
-    print(f"Model: Ollama ({OLLAMA_MODEL})")
-    response = get_ollama_response(prompt)
+    
+    if LLM_CHOICE == 'ollama':
+        print(f"Model: Ollama ({OLLAMA_MODEL})")
+        response = get_ollama_response(prompt)
+    elif LLM_CHOICE == 'gemini':
+        print("Model: Gemini Cloud")
+        response = get_gemini_response(prompt)
+    else:
+        response = "Error: Invalid LLM_CHOICE"
+        
     llm_time = time.time() - start_llm
     
     total_time = time.time() - start_total
@@ -341,7 +409,17 @@ def ask_credit_bot_stream(query, user_id="default"):
     # 3. LLM Generation Stage (Streaming)
     start_llm = time.time()
     full_response = ""
-    for chunk in get_ollama_response_stream(prompt):
+    
+    if LLM_CHOICE == 'ollama':
+        print(f"Model: Ollama Streaming ({OLLAMA_MODEL})")
+        stream = get_ollama_response_stream(prompt)
+    elif LLM_CHOICE == 'gemini':
+        print("Model: Gemini Cloud Streaming")
+        stream = get_gemini_response_stream(prompt)
+    else:
+        stream = ["Error: Invalid LLM_CHOICE"]
+
+    for chunk in stream:
         full_response += chunk
         yield chunk
     
